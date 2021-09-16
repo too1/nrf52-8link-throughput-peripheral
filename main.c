@@ -68,6 +68,7 @@
 #include "app_util_platform.h"
 #include "bsp_btn_ble.h"
 #include "nrf_pwr_mgmt.h"
+#include "nrf_delay.h"
 
 #if defined (UART_PRESENT)
 #include "nrf_uart.h"
@@ -91,8 +92,8 @@
 
 #define APP_ADV_DURATION                18000                                       /**< The advertising duration (180 seconds) in units of 10 milliseconds. */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(20, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(75, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(25, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(25, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
 #define SLAVE_LATENCY                   0                                           /**< Slave latency. */
 #define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(4000, UNIT_10_MS)             /**< Connection supervisory timeout (4 seconds), Supervision Timeout uses 10 ms units. */
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)                       /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (5 seconds). */
@@ -109,6 +110,8 @@ BLE_NUS_DEF(m_nus, NRF_SDH_BLE_TOTAL_LINK_COUNT);                               
 NRF_BLE_GATT_DEF(m_gatt);                                                           /**< GATT module instance. */
 NRF_BLE_QWR_DEF(m_qwr);                                                             /**< Context for the Queued Write module.*/
 BLE_ADVERTISING_DEF(m_advertising);                                                 /**< Advertising module instance. */
+
+APP_TIMER_DEF(m_generate_dummy_data_timer);
 
 static uint16_t   m_conn_handle          = BLE_CONN_HANDLE_INVALID;                 /**< Handle of the current connection. */
 static uint16_t   m_ble_nus_max_data_len = BLE_GATT_ATT_MTU_DEFAULT - 3;            /**< Maximum length of data (in bytes) that can be transmitted to the peer by the Nordic UART service module. */
@@ -134,11 +137,22 @@ void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
     app_error_handler(DEAD_BEEF, line_num, p_file_name);
 }
 
+static volatile int dummy_packets_to_send = 0;
+
+static void on_generate_dummy_data(void *p)
+{
+    if(dummy_packets_to_send > 0) printf("Overflow: %i\r\n", dummy_packets_to_send);
+    dummy_packets_to_send += 24;
+}
+
 /**@brief Function for initializing the timer module.
  */
 static void timers_init(void)
 {
     ret_code_t err_code = app_timer_init();
+    APP_ERROR_CHECK(err_code);
+    
+    err_code = app_timer_create(&m_generate_dummy_data_timer, APP_TIMER_MODE_REPEATED, on_generate_dummy_data);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -367,14 +381,30 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
             err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
             APP_ERROR_CHECK(err_code);
+            
+            NRF_LOG_DEBUG("PHY update request.");
+            ble_gap_phys_t const phys =
+            {
+                .rx_phys = BLE_GAP_PHY_2MBPS,
+                .tx_phys = BLE_GAP_PHY_2MBPS,
+            };
+            err_code = sd_ble_gap_phy_update(p_ble_evt->evt.gap_evt.conn_handle, &phys);
+            APP_ERROR_CHECK(err_code);      
+      
+            app_timer_start(m_generate_dummy_data_timer, APP_TIMER_TICKS(1000), 0);      
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
             NRF_LOG_INFO("Disconnected");
             // LED indication will be changed when advertising starts.
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            app_timer_stop(m_generate_dummy_data_timer);
             break;
-
+        case BLE_GAP_EVT_PHY_UPDATE:
+            printf("PHy updated: %i, %i\r\n", 
+                         p_ble_evt->evt.gap_evt.params.phy_update.tx_phy,
+                         p_ble_evt->evt.gap_evt.params.phy_update.rx_phy);
+            break;
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST:
         {
             NRF_LOG_DEBUG("PHY update request.");
@@ -691,6 +721,35 @@ static void advertising_start(void)
     APP_ERROR_CHECK(err_code);
 }
 
+#define DUMMY_DATA_SIZE 240
+static void send_dummy_data(void)
+{
+    static uint8_t test_buf[DUMMY_DATA_SIZE];
+    static bool first_time = true;
+    if(first_time)
+    {
+        for(int i = 0; i < DUMMY_DATA_SIZE; i++)
+        {
+            test_buf[i] = 'a' + (char)(i % 25);
+        }
+        first_time = false;
+    }
+    if(dummy_packets_to_send > 0)
+    {
+        test_buf[DUMMY_DATA_SIZE - 1] = '\n';    
+        test_buf[DUMMY_DATA_SIZE - 2] = '\r';
+        //printf("Dummy tx\r\n");
+        uint16_t length = DUMMY_DATA_SIZE;
+        int err_code = ble_nus_data_send(&m_nus, test_buf, &length, m_conn_handle);
+        if ((err_code != NRF_ERROR_INVALID_STATE) &&
+            (err_code != NRF_ERROR_RESOURCES) &&
+            (err_code != NRF_ERROR_NOT_FOUND))
+        {
+            APP_ERROR_CHECK(err_code);
+        }
+        if(err_code == NRF_SUCCESS) dummy_packets_to_send--;
+    }
+}
 
 /**@brief Application main function.
  */
@@ -716,10 +775,13 @@ int main(void)
     NRF_LOG_INFO("Debug logging for UART over RTT started.");
     advertising_start();
 
+
     // Enter main loop.
     for (;;)
     {
         idle_state_handle();
+        //nrf_delay_ms(1000);
+        send_dummy_data();
     }
 }
 
