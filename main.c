@@ -92,8 +92,8 @@
 
 #define APP_ADV_DURATION                18000                                       /**< The advertising duration (180 seconds) in units of 10 milliseconds. */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(25, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(25, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(20, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(20, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
 #define SLAVE_LATENCY                   0                                           /**< Slave latency. */
 #define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(4000, UNIT_10_MS)             /**< Connection supervisory timeout (4 seconds), Supervision Timeout uses 10 ms units. */
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)                       /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (5 seconds). */
@@ -142,7 +142,7 @@ static volatile int dummy_packets_to_send = 0;
 static void on_generate_dummy_data(void *p)
 {
     if(dummy_packets_to_send > 0) printf("Overflow: %i\r\n", dummy_packets_to_send);
-    dummy_packets_to_send += 24;
+    dummy_packets_to_send += 6;
 }
 
 /**@brief Function for initializing the timer module.
@@ -391,7 +391,7 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             err_code = sd_ble_gap_phy_update(p_ble_evt->evt.gap_evt.conn_handle, &phys);
             APP_ERROR_CHECK(err_code);      
       
-            app_timer_start(m_generate_dummy_data_timer, APP_TIMER_TICKS(1000), 0);      
+            app_timer_start(m_generate_dummy_data_timer, APP_TIMER_TICKS(250), 0);      
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
@@ -404,6 +404,13 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             printf("PHy updated: %i, %i\r\n", 
                          p_ble_evt->evt.gap_evt.params.phy_update.tx_phy,
                          p_ble_evt->evt.gap_evt.params.phy_update.rx_phy);
+            break;
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE:
+            printf("Data length: %i (%i), %i (%i)\r\n", 
+                    p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_tx_octets,
+                    p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_tx_time_us, 
+                    p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_rx_octets,
+                    p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_rx_time_us);
             break;
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST:
         {
@@ -484,7 +491,7 @@ void gatt_evt_handler(nrf_ble_gatt_t * p_gatt, nrf_ble_gatt_evt_t const * p_evt)
         m_ble_nus_max_data_len = p_evt->params.att_mtu_effective - OPCODE_LENGTH - HANDLE_LENGTH;
         NRF_LOG_INFO("Data len is set to 0x%X(%d)", m_ble_nus_max_data_len, m_ble_nus_max_data_len);
     }
-    NRF_LOG_DEBUG("ATT MTU exchange completed. central 0x%x peripheral 0x%x",
+    NRF_LOG_INFO("ATT MTU exchange completed. central 0x%x peripheral 0x%x",
                   p_gatt->att_mtu_desired_central,
                   p_gatt->att_mtu_desired_periph);
 }
@@ -748,6 +755,10 @@ static void send_dummy_data(void)
             APP_ERROR_CHECK(err_code);
         }
         if(err_code == NRF_SUCCESS) dummy_packets_to_send--;
+        if(length != DUMMY_DATA_SIZE)
+        {
+            printf("LENGTH too low!\r\n");
+        }
     }
 }
 
@@ -780,7 +791,6 @@ int main(void)
     for (;;)
     {
         idle_state_handle();
-        //nrf_delay_ms(1000);
         send_dummy_data();
     }
 }
